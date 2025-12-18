@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14-alpine
+    container_name: streaming-expert-db
+    environment:
+      POSTGRES_USER: streaming_expert
+      POSTGRES_PASSWORD: changeme_production
+      POSTGRES_DB: streaming_expert
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streaming_expert"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: streaming-expert-cache
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend Application (Node.js)
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: streaming-expert-backend
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://streaming_expert:changeme_production@postgres:5432/streaming_expert
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: info
+      # Provider API keys (set these in .env file)
+      GA4_PROPERTY_ID: ${GA4_PROPERTY_ID}
+      GA4_API_KEY: ${GA4_API_KEY}
+      MIXPANEL_PROJECT_TOKEN: ${MIXPANEL_PROJECT_TOKEN}
+      POSTHOG_API_KEY: ${POSTHOG_API_KEY}
+      CLARITY_PROJECT_ID: ${CLARITY_PROJECT_ID}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      algorithm-engine:
+        condition: service_started
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./logs:/app/logs
+    command: npm run dev
+
+  # Algorithm Engine (Python)
+  algorithm-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.algorithms
+    container_name: streaming-expert-algorithms
+    environment:
+      PYTHONUNBUFFERED: 1
+      LOG_LEVEL: INFO
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./src/algorithms:/app/algorithms
+      - ./data:/app/data
+    command: python -m algorithms.server --port 5001
+
+  # Nginx Reverse Proxy (Production)
+  nginx:
+    image: nginx:alpine
+    container_name: streaming-expert-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+  redis_data:
